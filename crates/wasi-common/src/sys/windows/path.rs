@@ -3,9 +3,10 @@ use crate::fd;
 use crate::path::PathGet;
 use crate::sys::entry::OsHandle;
 use crate::wasi::{types, Errno, Result};
+use log::debug;
 use std::convert::TryInto;
 use std::ffi::{OsStr, OsString};
-use std::fs::{File, OpenOptions};
+use std::fs::{File, Metadata, OpenOptions};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -164,11 +165,48 @@ pub(crate) fn create_directory(file: &File, path: &str) -> Result<()> {
 }
 
 pub(crate) fn link(
-    _resolved_old: PathGet,
-    _resolved_new: PathGet,
-    _follow_symlinks: bool,
+    resolved_old: PathGet,
+    resolved_new: PathGet,
+    follow_symlinks: bool,
 ) -> Result<()> {
-    unimplemented!("path_link")
+    use std::fs;
+    let mut old_path = resolved_old.concatenate()?;
+    let new_path = resolved_new.concatenate()?;
+    if follow_symlinks {
+        // in particular, this will return an error if the target path doesn't exist
+        debug!("Following symlinks for path: {:?}", old_path);
+        old_path = fs::canonicalize(&old_path).map_err(|e| match e.raw_os_error() {
+            // fs::canonicalize under Windows will return:
+            // * ERROR_FILE_NOT_FOUND, if it encounters a dangling symlink
+            // * ERROR_CANT_RESOLVE_FILENAME, if it encounters a symlink loop
+            Some(code) if code as u32 == winerror::ERROR_CANT_RESOLVE_FILENAME => Errno::Loop,
+            _ => e.into(),
+        })?;
+    }
+    fs::hard_link(&old_path, &new_path).or_else(|err| {
+        match err.raw_os_error() {
+            Some(code) => {
+                debug!("path_link at fs::hard_link error code={:?}", code);
+                match code as u32 {
+                    winerror::ERROR_ACCESS_DENIED => {
+                        // If an attempt is made to create a hard link to a directory, POSIX-compliant
+                        // implementations of link return `EPERM`, but `ERROR_ACCESS_DENIED` is converted
+                        // to `EACCES`. We detect and correct this case here.
+                        if fs::metadata(&old_path).map(|m| m.is_dir()).unwrap_or(false) {
+                            return Err(Errno::Perm);
+                        }
+                    }
+                    _ => {}
+                }
+
+                Err(err.into())
+            }
+            None => {
+                log::debug!("Inconvertible OS error: {}", err);
+                Err(Errno::Io)
+            }
+        }
+    })
 }
 
 pub(crate) fn open(
@@ -413,13 +451,27 @@ pub(crate) fn filestat_set_times(
 }
 
 pub(crate) fn symlink(old_path: &str, resolved: PathGet) -> Result<()> {
+    use std::fs;
     use std::os::windows::fs::{symlink_dir, symlink_file};
 
     let old_path = concatenate(&resolved.dirfd().as_os_handle(), Path::new(old_path))?;
     let new_path = resolved.concatenate()?;
 
-    // try creating a file symlink
-    let err = match symlink_file(&old_path, &new_path) {
+    // Windows distinguishes between file and directory symlinks.
+    // If the source doesn't exist or is an exotic file type, we fall back
+    // to regular file symlinks.
+    let use_dir_symlink = fs::metadata(&new_path)
+        .as_ref()
+        .map(Metadata::is_dir)
+        .unwrap_or(false);
+
+    let res = if use_dir_symlink {
+        symlink_dir(&old_path, &new_path)
+    } else {
+        symlink_file(&old_path, &new_path)
+    };
+
+    let err = match res {
         Ok(()) => return Ok(()),
         Err(e) => e,
     };
@@ -427,18 +479,15 @@ pub(crate) fn symlink(old_path: &str, resolved: PathGet) -> Result<()> {
         Some(code) => {
             log::debug!("path_symlink at symlink_file error code={:?}", code);
             match code as u32 {
-                winerror::ERROR_NOT_A_REPARSE_POINT => {
-                    // try creating a dir symlink instead
-                    return symlink_dir(old_path, new_path).map_err(Into::into);
-                }
-                winerror::ERROR_ACCESS_DENIED => {
-                    // does the target exist?
-                    if new_path.exists() {
-                        return Err(Errno::Exist);
-                    }
-                }
+                // If the target contains a trailing slash, the Windows API returns
+                // ERROR_INVALID_NAME (which corresponds to ENOENT) instead of
+                // ERROR_ALREADY_EXISTS (which corresponds to EEXIST)
+                //
+                // This concerns only trailing slashes (not backslashes) and
+                // only symbolic links (not hard links).
+                //
+                // Since POSIX will return EEXIST in such case, we simulate this behavior
                 winerror::ERROR_INVALID_NAME => {
-                    // does the target without trailing slashes exist?
                     if let Some(path) = strip_trailing_slashes_and_concatenate(&resolved)? {
                         if path.exists() {
                             return Err(Errno::Exist);

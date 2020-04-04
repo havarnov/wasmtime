@@ -335,6 +335,7 @@ impl<'builder> Template<'builder> {
                 ("Rex".to_string() + opcode, self.op_bytes.len() as u64 + 1)
             }
             RecipePrefixKind::InferRex => {
+                assert_eq!(self.w_bit, 0, "A REX.W bit always requires a REX prefix; avoid using `infer_rex().w()` and use `rex().w()` instead.");
                 // Hook up the right function for inferred compute_size().
                 assert!(
                     self.inferred_rex_compute_size.is_some(),
@@ -1604,7 +1605,7 @@ pub(crate) fn define<'shared>(
         );
 
         // XX /r register-indirect store with 8-bit offset of FPR.
-        recipes.add_template_recipe(
+        recipes.add_template_inferred(
             EncodingRecipeBuilder::new("fstDisp8", &formats.store, 2)
                 .operands_in(vec![fpr, gpr])
                 .inst_predicate(has_small_offset)
@@ -1626,6 +1627,7 @@ pub(crate) fn define<'shared>(
                         sink.put1(offset as u8);
                     "#,
                 ),
+            "size_plus_maybe_sib_inreg1_plus_rex_prefix_for_inreg0_inreg1",
         );
 
         // XX /r register-indirect store with 32-bit offset.
@@ -1682,7 +1684,7 @@ pub(crate) fn define<'shared>(
         );
 
         // XX /r register-indirect store with 32-bit offset of FPR.
-        recipes.add_template_recipe(
+        recipes.add_template_inferred(
             EncodingRecipeBuilder::new("fstDisp32", &formats.store, 5)
                 .operands_in(vec![fpr, gpr])
                 .clobbers_flags(false)
@@ -1703,6 +1705,7 @@ pub(crate) fn define<'shared>(
                         sink.put4(offset as u32);
                     "#,
                 ),
+            "size_plus_maybe_sib_inreg1_plus_rex_prefix_for_inreg0_inreg1",
         );
     }
 
@@ -2087,7 +2090,7 @@ pub(crate) fn define<'shared>(
         );
 
         // XX /r float load with 8-bit offset.
-        recipes.add_template_recipe(
+        recipes.add_template_inferred(
             EncodingRecipeBuilder::new("fldDisp8", &formats.load, 2)
                 .operands_in(vec![gpr])
                 .operands_out(vec![fpr])
@@ -2110,6 +2113,7 @@ pub(crate) fn define<'shared>(
                         sink.put1(offset as u8);
                     "#,
                 ),
+            "size_plus_maybe_sib_for_inreg_0_plus_rex_prefix_for_inreg0_outreg0",
         );
 
         let has_big_offset =
@@ -2142,7 +2146,7 @@ pub(crate) fn define<'shared>(
         );
 
         // XX /r float load with 32-bit offset.
-        recipes.add_template_recipe(
+        recipes.add_template_inferred(
             EncodingRecipeBuilder::new("fldDisp32", &formats.load, 5)
                 .operands_in(vec![gpr])
                 .operands_out(vec![fpr])
@@ -2165,6 +2169,7 @@ pub(crate) fn define<'shared>(
                         sink.put4(offset as u32);
                     "#,
                 ),
+            "size_plus_maybe_sib_for_inreg_0_plus_rex_prefix_for_inreg0_outreg0",
         );
     }
 
